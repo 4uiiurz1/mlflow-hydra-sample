@@ -37,6 +37,8 @@ class BaseDataset(Dataset, ABC):
 
         self.sigma = cfg.model.sigma
 
+        self.unbiased_encoding = cfg.dataset.unbiased_encoding
+
         self.transform = transform
         self.db = []
 
@@ -130,45 +132,74 @@ class BaseDataset(Dataset, ABC):
         target = np.zeros((self.num_joints,
                            self.output_h,
                            self.output_w),
-                          dtype=np.float32)
+                           dtype=np.float32)
 
         tmp_size = self.sigma * 3
 
-        for joint_id in range(self.num_joints):
-            feat_stride = [
-                self.input_w / self.output_w,
-                self.input_h / self.output_h,
-            ]
-            mu_x = int(joints[joint_id][0] / feat_stride[0] + 0.5)
-            mu_y = int(joints[joint_id][1] / feat_stride[1] + 0.5)
-            # Check that any part of the gaussian is in-bounds
-            ul = [int(mu_x - tmp_size), int(mu_y - tmp_size)]
-            br = [int(mu_x + tmp_size + 1), int(mu_y + tmp_size + 1)]
-            if ul[0] >= self.output_w or ul[1] >= self.output_h \
-                    or br[0] < 0 or br[1] < 0:
-                # If not, just return the image as is
-                target_weight[joint_id] = 0
-                continue
+        if self.unbiased_encoding:
+            for joint_id in range(self.num_joints):
+                heatmap_vis = joints_visible[joint_id, 0]
+                target_weight[joint_id] = heatmap_vis
 
-            # Generate gaussian
-            size = 2 * tmp_size + 1
-            x = np.arange(0, size, 1, np.float32)
-            y = x[:, np.newaxis]
-            x0 = y0 = size // 2
-            # The gaussian is not normalized, we want the center value to equal 1
-            g = np.exp(- ((x - x0) ** 2 + (y - y0) ** 2) /
-                       (2 * self.sigma ** 2))
+                feat_stride = [
+                    self.input_w / self.output_w,
+                    self.input_h / self.output_h,
+                ]
+                mu_x = joints[joint_id][0] / feat_stride[0]
+                mu_y = joints[joint_id][1] / feat_stride[1]
+                # Check that any part of the gaussian is in-bounds
+                ul = [mu_x - tmp_size, mu_y - tmp_size]
+                br = [mu_x + tmp_size + 1, mu_y + tmp_size + 1]
+                if ul[0] >= self.output_w or ul[1] >= self.output_h or br[
+                        0] < 0 or br[1] < 0:
+                    target_weight[joint_id] = 0
 
-            # Usable gaussian range
-            g_x = max(0, -ul[0]), min(br[0], self.output_w) - ul[0]
-            g_y = max(0, -ul[1]), min(br[1], self.output_h) - ul[1]
-            # Image range
-            img_x = max(0, ul[0]), min(br[0], self.output_w)
-            img_y = max(0, ul[1]), min(br[1], self.output_h)
+                if target_weight[joint_id] == 0:
+                    continue
 
-            v = target_weight[joint_id]
-            if v > 0.5:
-                target[joint_id][img_y[0]:img_y[1], img_x[0]:img_x[1]] = \
-                    g[g_y[0]:g_y[1], g_x[0]:g_x[1]]
+                x = np.arange(0, self.output_w, 1, np.float32)
+                y = np.arange(0, self.output_h, 1, np.float32)
+                y = y[:, None]
+
+                if target_weight[joint_id] > 0.5:
+                    target[joint_id] = np.exp(
+                        -((x - mu_x)**2 + (y - mu_y)**2) / (2 * self.sigma**2))
+        else:
+            for joint_id in range(self.num_joints):
+                heatmap_vis = joints_visible[joint_id, 0]
+                target_weight[joint_id] = heatmap_vis
+
+                feat_stride = [
+                    self.input_w / self.output_w,
+                    self.input_h / self.output_h,
+                ]
+                mu_x = int(joints[joint_id][0] / feat_stride[0] + 0.5)
+                mu_y = int(joints[joint_id][1] / feat_stride[1] + 0.5)
+                # Check that any part of the gaussian is in-bounds
+                ul = [int(mu_x - tmp_size), int(mu_y - tmp_size)]
+                br = [int(mu_x + tmp_size + 1), int(mu_y + tmp_size + 1)]
+                if ul[0] >= self.output_w or ul[1] >= self.output_h or br[
+                        0] < 0 or br[1] < 0:
+                    target_weight[joint_id] = 0
+
+                if target_weight[joint_id] > 0.5:
+                    size = 2 * tmp_size + 1
+                    x = np.arange(0, size, 1, np.float32)
+                    y = x[:, None]
+                    x0 = y0 = size // 2
+                    # The gaussian is not normalized,
+                    # we want the center value to equal 1
+                    g = np.exp(-((x - x0)**2 + (y - y0)**2) /
+                               (2 * self.sigma**2))
+
+                    # Usable gaussian range
+                    g_x = max(0, -ul[0]), min(br[0], self.output_w) - ul[0]
+                    g_y = max(0, -ul[1]), min(br[1], self.output_h) - ul[1]
+                    # Image range
+                    img_x = max(0, ul[0]), min(br[0], self.output_w)
+                    img_y = max(0, ul[1]), min(br[1], self.output_h)
+
+                    target[joint_id][img_y[0]:img_y[1], img_x[0]:img_x[1]] = \
+                        g[g_y[0]:g_y[1], g_x[0]:g_x[1]]
 
         return target, target_weight

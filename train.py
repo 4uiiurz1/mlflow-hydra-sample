@@ -139,7 +139,7 @@ def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
             score = meta['score'].numpy()
 
             preds, maxvals = get_final_preds(
-                output.clone().cpu().numpy(), c, s)
+                cfg, output.clone().cpu().numpy(), c, s)
 
             all_preds[idx:idx + num_images, :, 0:2] = preds[:, :, 0:2]
             all_preds[idx:idx + num_images, :, 2:3] = maxvals
