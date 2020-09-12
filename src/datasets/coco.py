@@ -42,14 +42,14 @@ class COCODataset(BaseDataset):
         [7,9],[8,10],[9,11],[2,3],[1,2],[1,3],[2,4],[3,5],[4,6],[5,7]]
     '''
 
-    def __init__(self, cfg, root, image_set, is_train, transform=None):
-        super().__init__(cfg, root, image_set, is_train, transform)
-        self.nms_thr = cfg.test.nms_thr
-        self.img_thr = cfg.test.image_thr
-        self.oks_thr = cfg.test.oks_thr
-        self.in_vis_thre = cfg.test.in_vis_thr
-        self.use_gt_bbox = cfg.test.use_gt_bbox
-        self.aspect_ratio = self.input_w * 1.0 / self.input_h
+    def __init__(self, config, root, image_set, is_train):
+        super().__init__(config, root, image_set, is_train)
+        
+        self.nms_thr = config.test.nms_thr
+        self.img_thr = config.test.image_thr
+        self.oks_thr = config.test.oks_thr
+        self.in_vis_thre = config.test.in_vis_thr
+        self.use_gt_bbox = config.test.use_gt_bbox
 
         self.coco = COCO(self._get_ann_file_keypoint())
 
@@ -70,8 +70,10 @@ class COCODataset(BaseDataset):
         self.num_images = len(self.image_set_index)
 
         self.num_joints = 17
-        self.flip_pairs = [[1, 2], [3, 4], [5, 6], [7, 8],
-                           [9, 10], [11, 12], [13, 14], [15, 16]]
+        self.flip_pairs = ((1, 2), (3, 4), (5, 6), (7, 8),
+                           (9, 10), (11, 12), (13, 14), (15, 16))
+        self.upper_body_ids = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+        self.lower_body_ids = (11, 12, 13, 14, 15, 16)
 
         self.db = self._get_db()
 

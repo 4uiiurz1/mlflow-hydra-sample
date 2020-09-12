@@ -1,7 +1,7 @@
 gpus: '0'
 workers: 4
 print_freq: 100
-name: 
+name: null 
 
 dataset:
   name: 'coco'
@@ -11,6 +11,9 @@ dataset:
   flip: true
   rot_factor: 40
   scale_factor: 0.3
+  half_body_prob: 0.3
+  half_body_num_joints: 8
+
   unbiased_encoding: false
 model:
   name: 'mobilenet_v3_small'
@@ -31,6 +34,14 @@ model:
   - 4
   - 4
   - 4
+  mean:
+  - 0.485
+  - 0.456
+  - 0.406
+  std:
+  - 0.229
+  - 0.224
+  - 0.225
 loss:
   use_target_weight: true
 train:

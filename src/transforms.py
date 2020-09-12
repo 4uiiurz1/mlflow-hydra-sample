@@ -18,7 +18,7 @@ def fliplr_joints(joints, joints_vis, width, matched_parts):
         joints_vis[pair[0], :], joints_vis[pair[1], :] = \
             joints_vis[pair[1], :], joints_vis[pair[0], :].copy()
 
-    return joints*joints_vis, joints_vis
+    return joints * joints_vis, joints_vis
 
 
 def transform_preds(coords, center, scale, output_size):
@@ -96,3 +96,50 @@ def crop(img, center, scale, output_size, rot=0):
                              flags=cv2.INTER_LINEAR)
 
     return dst_img
+
+
+def half_body_transform(joints, joints_visible, num_joints, upper_body_ids, aspect_ratio):
+    upper_joints = []
+    lower_joints = []
+    for joint_id in range(num_joints):
+        if joints_visible[joint_id][0] > 0:
+            if joint_id in upper_body_ids:
+                upper_joints.append(joints[joint_id])
+            else:
+                lower_joints.append(joints[joint_id])
+
+    if np.random.randn() < 0.5 and len(upper_joints) > 2:
+        selected_joints = upper_joints
+    elif len(lower_joints) > 2:
+        selected_joints = lower_joints
+    else:
+        selected_joints = upper_joints
+
+    if len(selected_joints) < 2:
+        return None, None
+
+    selected_joints = np.array(selected_joints, dtype=np.float32)
+    center = selected_joints.mean(axis=0)[:2]
+
+    left_top = np.amin(selected_joints, axis=0)
+    right_bottom = np.amax(selected_joints, axis=0)
+
+    w = right_bottom[0] - left_top[0]
+    h = right_bottom[1] - left_top[1]
+
+    if w > aspect_ratio * h:
+        h = w * 1.0 / aspect_ratio
+    elif w < aspect_ratio * h:
+        w = h * aspect_ratio
+
+    scale = np.array(
+        [
+            w / 200.0,
+            h / 200.0
+        ],
+        dtype=np.float32
+    )
+
+    scale = scale * 1.5
+
+    return center, scale

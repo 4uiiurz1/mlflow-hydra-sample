@@ -10,36 +10,52 @@ import cv2
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 from abc import ABC, abstractmethod
 
-from ..transforms import get_affine_transform
-from ..transforms import affine_transform
-from ..transforms import fliplr_joints
+from ..transforms import (
+    get_affine_transform,
+    affine_transform,
+    fliplr_joints,
+    half_body_transform,
+)
 
 
 class BaseDataset(Dataset, ABC):
-    def __init__(self, cfg, root, image_set, is_train, transform=None):
+    def __init__(self, config, root, image_set, is_train):
         self.num_joints = 0
-        self.flip_pairs = None
 
         self.is_train = is_train
         self.root = root
         self.image_set = image_set
 
-        self.scale_factor = cfg.dataset.scale_factor
-        self.rotation_factor = cfg.dataset.rot_factor
-        self.flip = cfg.dataset.flip
+        self.scale_factor = config.dataset.scale_factor
+        self.rotation_factor = config.dataset.rot_factor
+        self.flip = config.dataset.flip
+        self.half_body_prob = config.dataset.half_body_prob
+        self.half_body_num_joints = config.dataset.half_body_num_joints
 
-        self.input_w = cfg.model.input_w
-        self.input_h = cfg.model.input_h
-        self.output_w = cfg.model.output_w
-        self.output_h = cfg.model.output_h
+        self.input_w = config.model.input_w
+        self.input_h = config.model.input_h
+        self.output_w = config.model.output_w
+        self.output_h = config.model.output_h
+        self.aspect_ratio = self.input_w * 1.0 / self.input_h
 
-        self.sigma = cfg.model.sigma
+        self.sigma = config.model.sigma
 
-        self.unbiased_encoding = cfg.dataset.unbiased_encoding
+        self.unbiased_encoding = config.dataset.unbiased_encoding
 
-        self.transform = transform
+        self.transform = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=config.model.mean,
+                std=config.model.std),
+        ])
+
+        self.flip_pairs = None
+        self.upper_body_ids = None
+        self.lower_body_ids = None
+
         self.db = []
 
     @abstractmethod
@@ -58,7 +74,6 @@ class BaseDataset(Dataset, ABC):
 
         image_file = db_rec['image']
         filename = db_rec['filename'] if 'filename' in db_rec else ''
-        imgnum = db_rec['imgnum'] if 'imgnum' in db_rec else ''
 
         img = cv2.imread(
             image_file, cv2.IMREAD_COLOR | cv2.IMREAD_IGNORE_ORIENTATION)
@@ -74,7 +89,21 @@ class BaseDataset(Dataset, ABC):
         score = db_rec['score'] if 'score' in db_rec else 1
         r = 0
 
+        # augmentation
         if self.is_train:
+            if (np.sum(joints_visible[:, 0]) > self.half_body_num_joints
+                    and np.random.rand() < self.half_body_prob):
+                c_half_body, s_half_body = half_body_transform(
+                    joints,
+                    joints_visible,
+                    self.num_joints,
+                    self.upper_body_ids,
+                    self.aspect_ratio)
+
+                if c_half_body is not None and s_half_body is not None:
+                    c = c_half_body
+                    s = s_half_body
+
             sf = self.scale_factor
             rf = self.rotation_factor
             s = s * np.clip(np.random.randn()*sf + 1, 1 - sf, 1 + sf)
@@ -109,7 +138,6 @@ class BaseDataset(Dataset, ABC):
         meta = {
             'image': image_file,
             'filename': filename,
-            'imgnum': imgnum,
             'joints': joints,
             'joints_visible': joints_visible,
             'center': c,
@@ -132,11 +160,12 @@ class BaseDataset(Dataset, ABC):
         target = np.zeros((self.num_joints,
                            self.output_h,
                            self.output_w),
-                           dtype=np.float32)
+                          dtype=np.float32)
 
         tmp_size = self.sigma * 3
 
         if self.unbiased_encoding:
+            # DARK
             for joint_id in range(self.num_joints):
                 heatmap_vis = joints_visible[joint_id, 0]
                 target_weight[joint_id] = heatmap_vis

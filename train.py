@@ -1,9 +1,5 @@
-"""
-Adapted from https://github.com/leoxiaobin/deep-high-resolution-net.pytorch
-Original licence: Copyright (c) Microsoft, under the MIT License.
-"""
-
 import os
+import shutil
 import time
 from collections import OrderedDict
 import logging
@@ -13,22 +9,22 @@ from tqdm import tqdm
 import numpy as np
 import hydra
 import mlflow
+from omegaconf import OmegaConf
 
 import torch
 import torch.nn.parallel
 import torch.backends.cudnn as cudnn
-import torch.optim as optim
 import torch.utils.data
 import torch.utils.data.distributed
-import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import MultiStepLR
 
 from src.losses import JointsMSELoss
 from src.metrics import accuracy
 from src.postprocess import get_final_preds
+from src.optimizers import get_optimizer
 from src.utils.utils import AverageMeter
 from src.utils.debug import save_debug_images, save_checkpoint
-from src.utils.mlflow import log_params_from_omegaconf_dict, start_run
+from src.utils.mlflow import log_params_to_mlflow, search_run
 import src.models as models
 import src.datasets as datasets
 
@@ -94,7 +90,7 @@ def train(train_loader, model, criterion, optimizer):
     }
 
 
-def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
+def validate(config, val_loader, val_dataset, model, criterion, output_dir):
     batch_time = AverageMeter()
     losses = AverageMeter()
     acc = AverageMeter()
@@ -103,7 +99,7 @@ def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
     model.eval()
 
     num_samples = len(val_dataset)
-    all_preds = np.zeros((num_samples, cfg.model.num_joints, 3),
+    all_preds = np.zeros((num_samples, config.model.num_joints, 3),
                          dtype=np.float32)
     all_boxes = np.zeros((num_samples, 6))
     img_path = []
@@ -139,7 +135,7 @@ def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
             score = meta['score'].numpy()
 
             preds, maxvals = get_final_preds(
-                cfg, output.clone().cpu().numpy(), c, s)
+                config, output.clone().cpu().numpy(), c, s)
 
             all_preds[idx:idx + num_images, :, 0:2] = preds[:, :, 0:2]
             all_preds[idx:idx + num_images, :, 2:3] = maxvals
@@ -152,7 +148,7 @@ def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
 
             idx += num_images
 
-            if i % cfg.print_freq == 0:
+            if i % config.print_freq == 0:
                 prefix = '{}_{}'.format('val', i)
                 save_debug_images(input, meta, target, pred * 4, output,
                                   prefix)
@@ -187,108 +183,122 @@ def validate(cfg, val_loader, val_dataset, model, criterion, output_dir):
     }
 
 
-def get_optimizer(cfg, model):
-    if cfg.train.optimizer == 'sgd':
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=cfg.train.lr,
-            momentum=cfg.train.momentum,
-            weight_decay=cfg.train.wd,
-            nesterov=cfg.train.nesterov,
-        )
-    elif cfg.train.optimizer == 'adam':
-        optimizer = optim.Adam(
-            model.parameters(),
-            lr=cfg.train.lr,
-        )
-    else:
-        raise NotImplementedError
-
-    return optimizer
-
-
 @hydra.main(config_name='configs/config.yml')
-def main(cfg):
-    # Set run name
-    run_name = '%s_%s' % (
-        cfg.model.name, datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
-
+def main(config):
     # Get original current directory path
     cwd = hydra.utils.get_original_cwd()
+
+    # Get hydra current directory path
+    hydra_dir = os.getcwd()
+
+    # Set name
+    if config.name is None:
+        config.name = '%s_%s' % (
+            config.model.name, datetime.now().strftime('%Y-%m-%d-%H-%M-%S'))
+        with open('.hydra/config.yaml', 'w') as file:
+            file.write(OmegaConf.to_yaml(config))
+    
+    os.chdir(cwd)
+    
+    # Search mlflow run id
+    run_id = search_run(config.name)
+    if run_id is None:
+        resume = False
+    else:
+        resume = True
+
+    # Make model directory
+    model_dir = os.path.join(cwd, 'models', config.name)
+    if not resume:
+        os.makedirs(model_dir, exist_ok=True)
 
     # Set tracking uri
     mlflow.set_tracking_uri('file:/' + os.path.join(cwd, 'mlruns'))
 
-    # Start a new MLflow run
-    mlflow.start_run(run_name=run_name)
+    # Start a MLflow run
+    if resume:
+        mlflow.start_run(run_id=run_id)
+    else:
+        mlflow.start_run(run_name=config.name)
+
+    os.chdir(hydra_dir)
+
+    # Save config files
+    if not resume:
+        shutil.copy('.hydra/config.yaml', model_dir)
+        shutil.copy('.hydra/hydra.yaml', model_dir)
+        shutil.copy('.hydra/overrides.yaml', model_dir)
 
     # Log hydra params
-    log_params_from_omegaconf_dict(cfg)
+    if not resume:
+        log_params_to_mlflow(config)
 
     # Create model
-    model = getattr(models, cfg.model.name)(cfg)
+    model = getattr(models, config.model.name)(config)
 
-    gpus = [int(i) for i in cfg.gpus.split(',')]
+    gpus = [int(i) for i in config.gpus.split(',')]
     model = torch.nn.DataParallel(model, device_ids=gpus).cuda()
     cudnn.benchmark = True
 
     # Get loss
     criterion = JointsMSELoss(
-        use_target_weight=cfg.loss.use_target_weight).cuda()
+        use_target_weight=config.loss.use_target_weight).cuda()
 
     # Get optimizer
-    optimizer = get_optimizer(cfg, model)
+    optimizer = get_optimizer(config, model)
 
     # Get lr scheduler
     scheduler = MultiStepLR(
         optimizer,
-        cfg.train.lr_step,
-        cfg.train.lr_factor,
+        config.train.lr_step,
+        config.train.lr_factor,
     )
 
     # Create dataset and data loader
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.229, 0.224, 0.225])
-    train_dataset = getattr(datasets, cfg.dataset.name)(
-        cfg,
-        cfg.dataset.root,
-        cfg.dataset.train_set,
-        True,
-        transforms.Compose([
-            transforms.ToTensor(),
-            normalize,
-        ])
+    train_dataset = getattr(datasets, config.dataset.name)(
+        config,
+        config.dataset.root,
+        config.dataset.train_set,
+        is_train=True,
     )
-    valid_dataset = getattr(datasets, cfg.dataset.name)(
-        cfg,
-        cfg.dataset.root,
-        cfg.dataset.test_set,
-        False,
-        transforms.Compose([
-            transforms.ToTensor(),
-            normalize,
-        ])
+    valid_dataset = getattr(datasets, config.dataset.name)(
+        config,
+        config.dataset.root,
+        config.dataset.test_set,
+        is_train=False,
     )
 
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
-        batch_size=cfg.train.batch_size * len(gpus),
+        batch_size=config.train.batch_size * len(gpus),
         shuffle=True,
-        num_workers=cfg.workers,
+        num_workers=config.workers,
         pin_memory=True
     )
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset,
-        batch_size=cfg.test.batch_size * len(gpus),
+        batch_size=config.test.batch_size * len(gpus),
         shuffle=False,
-        num_workers=cfg.workers,
+        num_workers=config.workers,
         pin_memory=True
     )
 
+    start_epoch = 0
     best_ap = 0.0
+
+    # Resume a training
+    checkpoint_path = os.path.join(model_dir, 'checkpoint.pth.tar')
+    if resume and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path)
+        start_epoch = checkpoint['epoch']
+        model.load_state_dict(checkpoint['state_dict'])
+        best_ap = checkpoint['ap']
+        optimizer.load_state_dict(checkpoint['optimizer'])
+        scheduler.load_state_dict(checkpoint['scheduler'])
+    
     best_model = False
-    for epoch in range(0, cfg.train.epochs):
-        print('Epoch [%d/%d]' % (epoch + 1, cfg.train.epochs))
+    for epoch in range(start_epoch, config.train.epochs):
+        print('Epoch [%d/%d]' % (epoch + 1, config.train.epochs))
 
         # Train
         train_metrics = train(train_loader, model, criterion, optimizer)
@@ -300,7 +310,7 @@ def main(cfg):
         scheduler.step()
 
         # Evaluate on validation set
-        val_metrics = validate(cfg, valid_loader, valid_dataset, model,
+        val_metrics = validate(config, valid_loader, valid_dataset, model,
                                criterion, '.')
         logger.info(val_metrics)
 
@@ -319,7 +329,7 @@ def main(cfg):
             'ap': val_metrics['ap'],
             'optimizer': optimizer.state_dict(),
             'scheduler': scheduler.state_dict(),
-        }, best_model, os.path.join(cwd, 'models', cfg.model.name))
+        }, best_model, model_dir)
 
 
 if __name__ == '__main__':
